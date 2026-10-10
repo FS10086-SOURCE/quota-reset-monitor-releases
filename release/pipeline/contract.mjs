@@ -18,7 +18,7 @@ export function receipt(input,workflowSha){
  if(r.workflowSha!==workflowSha||r.overlaySha256!==OVERLAY_SHA256||r.publicKeyId!==KEY_ID)fail();
  for(const k of ['buildRunId','privateArtifactId'])if(!/^[1-9][0-9]{0,19}$/.test(r[k]))fail();
  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}-setup\.exe$/.test(r.installerName)||!Number.isSafeInteger(r.installerSize)||r.installerSize<2||r.installerSize>MAX_INSTALLER||!/^[a-f0-9]{64}$/.test(r.installerSha256))fail();
- if(typeof r.notes!=='string'||Buffer.byteLength(r.notes)>4096||/[\u0000-\u0008\u000b-\u001f]/.test(r.notes)||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(r.builtAt)||!Number.isFinite(Date.parse(r.builtAt)))fail();
+ if(typeof r.notes!=='string'||Buffer.byteLength(r.notes)>4096||(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(r.notes)||/\r(?!\n)/.test(r.notes))||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(r.builtAt)||!Number.isFinite(Date.parse(r.builtAt)))fail();
  return Object.freeze(r);
 }
 export function exactInstaller(bytes,r){if(bytes.length!==r.installerSize||hash(bytes)!==r.installerSha256||bytes[0]!==0x4d||bytes[1]!==0x5a)fail();}
