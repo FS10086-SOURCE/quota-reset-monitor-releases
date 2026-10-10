@@ -1,0 +1,169 @@
+# CANDIDATE ONLY. Copy to PUBLIC binary repository .github/workflows only after review/approval.
+# Public source application is never checked out. Every version requires owner release approval.
+name: Owner-approved signed Windows release
+on:
+  workflow_dispatch:
+    inputs:
+      approved_receipt:
+        description: Exact reviewed JSON receipt; public nonsensitive fields only
+        type: string
+        required: true
+      release_id:
+        description: Authorized draft release numeric ID
+        type: string
+        required: true
+      installer_asset_id:
+        description: Exact uploaded installer asset numeric ID
+        type: string
+        required: true
+permissions: {}
+concurrency:
+  group: qrm-production-release
+  cancel-in-progress: false
+env:
+  APPROVED_RECEIPT: ${{ inputs.approved_receipt }}
+  RELEASE_ID: ${{ inputs.release_id }}
+  INSTALLER_ASSET_ID: ${{ inputs.installer_asset_id }}
+jobs:
+  review_receipt:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository == 'FS10086-SOURCE/quota-reset-monitor-releases' &&
+      github.event.repository.private == false && github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: release
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+      - name: Show exact owner approval receipt without accessing draft assets
+        run: node release/pipeline/run.mjs summary
+  prepare:
+    needs: review_receipt
+    environment: production-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # GitHub draft visibility requires push capability. This reviewed mode performs GET only.
+    # This transient permission is explicitly disclosed; no repository/persistent token is created.
+    permissions:
+      contents: write
+    outputs:
+      prepared_id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.prepare.outputs.version }}
+      installer_sha256: ${{ steps.prepare.outputs.installer_sha256 }}
+      installer_size: ${{ steps.prepare.outputs.installer_size }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: release
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+      - id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node release/pipeline/run.mjs prepare
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: prepared-${{ github.run_id }}
+          path: ${{ runner.temp }}/qrm-release/*
+          if-no-files-found: error
+          retention-days: 1
+  sign:
+    needs: prepare
+    environment: production-release
+    runs-on: windows-2022
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      signature_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      # Fresh runner, no checkout, no dependency build, no cache, no installer execution.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.prepared_id }}
+          path: ${{ runner.temp }}/qrm-release
+          merge-multiple: true
+      - name: Prepare pinned official CLI without signing secrets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'tauri-cli.zip'
+          curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 33554432 --output $zip 'https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.12.1/cargo-tauri-x86_64-pc-windows-msvc.zip'
+          if ($LASTEXITCODE -ne 0) { throw 'Official CLI download failed' }
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'd3919ebe0bf7013dd98293862784dd37b8f76db2d650e13a3ec11c5dd799c519') { throw 'CLI archive mismatch' }
+          $dir = Join-Path $env:RUNNER_TEMP 'qrm-official-cli'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          $exe = Join-Path $dir 'cargo-tauri.exe'
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c5f10492b295d8a6d7aac4dc8d735b28e25cc8b19d576bf649d5367408de01be') { throw 'CLI executable mismatch' }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLI failed' }
+      - name: Sign only the approved inert installer
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPROVED_VERSION: ${{ needs.prepare.outputs.version }}
+          APPROVED_SHA256: ${{ needs.prepare.outputs.installer_sha256 }}
+          APPROVED_SIZE: ${{ needs.prepare.outputs.installer_size }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY) -or [string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) { throw 'Owner environment secrets are not provisioned' }
+          if ($env:APPROVED_VERSION -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$' -or $env:APPROVED_SHA256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid approved identity' }
+          $dir = Join-Path $env:RUNNER_TEMP 'qrm-release'
+          $file = Join-Path $dir 'installer.exe'
+          $exe = Join-Path $env:RUNNER_TEMP 'qrm-official-cli/cargo-tauri.exe'
+          if ((Get-Item $file).Length -ne [long]$env:APPROVED_SIZE -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:APPROVED_SHA256) { throw 'Installer changed' }
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c5f10492b295d8a6d7aac4dc8d735b28e25cc8b19d576bf649d5367408de01be') { throw 'CLI changed' }
+          $files = @(Get-ChildItem -LiteralPath $dir -Force)
+          if ($files.Count -ne 2 -or @($files | Where-Object { $_.Name -notin @('installer.exe','receipt.json') -or $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) { throw 'Unexpected prepared files or existing signature' }
+          Set-Location $dir
+          try {
+            & $exe signer sign --app-version $env:APPROVED_VERSION $file *> $null
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path ($file + '.sig'))) { throw 'Signing failed; no publication' }
+          } finally {
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+          }
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signature-${{ github.run_id }}
+          path: ${{ runner.temp }}/qrm-release/installer.exe.sig
+          if-no-files-found: error
+          retention-days: 1
+  verify_publish:
+    needs: [prepare, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: release
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.prepared_id }},${{ needs.sign.outputs.signature_id }}
+          path: ${{ runner.temp }}/qrm-release
+          merge-multiple: true
+      - name: Verify exact signature, version and remote bytes before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node release/pipeline/run.mjs publish
