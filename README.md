@@ -4,7 +4,7 @@
 
 ## 下载与安装
 
-[下载最新版 Windows x64 安装包](https://github.com/FS10086-SOURCE/quota-reset-monitor-releases/releases/latest) · [查看 0.1.15 更新说明](https://github.com/FS10086-SOURCE/quota-reset-monitor-releases/releases/tag/v0.1.15)
+[GitHub 下载最新版](https://github.com/FS10086-SOURCE/quota-reset-monitor-releases/releases/latest) · [itch.io 下载与自愿捐赠](https://fs10086.itch.io/reset-radar) · [查看 0.1.15 更新说明](https://github.com/FS10086-SOURCE/quota-reset-monitor-releases/releases/tag/v0.1.15)
 
 在发行页面下载文件名以 `x64-setup.exe` 结尾的安装包，运行后按提示安装。应用使用 Microsoft Edge WebView2 Runtime，并提供应用内更新；更新包经过固定公钥签名校验。
 
